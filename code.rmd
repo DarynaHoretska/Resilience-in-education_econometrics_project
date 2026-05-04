@@ -1,0 +1,416 @@
+# ***Econometrics Project***
+
+### Resilience of Secondary Education in Ukraine During Wartime
+
+Hovorov, Pechenenko, Horetska
+
+---
+title: "Resilience of Secondary Education in Ukraine
+During Wartime"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(patchwork)
+library(lmtest)
+library(car)
+library(sandwich)
+library(pROC)
+library(tidyverse)
+```
+
+```{r}
+load_year <- function(path, year) {
+  dt <- fread(path, 
+            encoding  = "UTF-8", 
+            fill      = TRUE,         
+            sep       = ";",
+            na.strings = c("", "null", "NULL", "н/д"))
+  
+
+  col_map <- list(
+    "2022" = list(
+      math_ball  = "Block3Ball",      
+      math_b100  = "Block3Ball100",
+      ukr_ball   = "Block1Ball",
+      hist_ball  = "Block2Ball"
+    ),
+    "new" = list(
+      math_ball  = "MathBlockBall",
+      math_b100  = "MathBlockBall100",
+      ukr_ball   = "UkrBlockBall",
+      hist_ball  = "HistBlockBall"
+    )
+  )
+  
+  fmt <- if (year == 2022) "2022" else "new"
+  m   <- col_map[[fmt]]
+  
+  
+  result <- dt[, .(
+    Year      = year,
+    Math_raw  = as.numeric(get(m$math_ball)),
+    Math_b100 = as.numeric(get(m$math_b100)),
+    Ukr_raw   = as.numeric(get(m$ukr_ball)),
+    Hist_raw  = as.numeric(get(m$hist_ball))
+  )]
+  
+  result <- result[!is.na(Math_raw) & Math_raw > 0]
+  
+  cat(sprintf("Year %d: %d participants (math)\n", year, nrow(result)))
+  return(result)
+}
+
+
+full_data <- rbindlist(list(
+  load_year("Odata2022File.csv", 2022),
+  load_year("Odata2023File.csv", 2023),
+  load_year("Odata2024File.csv", 2024),
+  load_year("Odata2025File.csv", 2025)
+))
+
+full_data[, Math_z   := scale(Math_raw), by = Year]
+full_data[, Math_pct := rank(Math_raw, ties.method = "average") / .N * 100, by = Year]
+```
+
+```{r}
+data <- read.csv("nmt_merged2021-2025.csv")
+data$MathBall100 <- as.numeric(gsub(",", ".", data$MathBall100))
+
+data$SexTypeName <- as.factor(data$SexTypeName)
+data$TerTypeName <- as.factor(data$TerTypeName)
+data$RegName     <- as.factor(data$RegName)
+data$PTRegName   <- as.factor(data$PTRegName)
+
+
+data$performance <- as.numeric(gsub(",", ".", data$MathBall100))
+
+data <- data[data$performance > 0 & !is.na(data$performance), ]
+final_df <- na.omit(data[, c("performance",
+                          "SexTypeName",
+                          "TerTypeName",
+                          "RegName",
+                          "Year",
+                          "PTRegName"
+                          )])
+
+data$Year  <- as.numeric(as.character(data$Year))
+data$Birth <- as.numeric(as.character(data$Birth))
+data$age   <- data$Year - data$Birth
+
+
+```
+
+### Exploratory Data Analysis
+
+```{r}
+year_colors <- c("2022" = "#E74C3C", "2023" = "#2ECC71", 
+                 "2024" = "#3498DB", "2025" = "#9B59B6")
+
+p1 <- ggplot(full_data, aes(x = Math_z, 
+                             fill = factor(Year), 
+                             color = factor(Year))) +
+  geom_density(alpha = 0.25, linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_fill_manual(values = year_colors) +
+  scale_color_manual(values = year_colors) +
+  coord_cartesian(xlim = c(-3, 4)) +
+  labs(
+    title    = "Distribution of Z-normalized Scores",
+    subtitle = "Z-scores calculated within each year",
+    x = "Z-score", y = "Density",
+    fill = "Year", color = "Year"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        plot.title    = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 10))
+
+
+p2 <- ggplot(full_data, aes(x = factor(Year), y = Math_z,
+                             fill = factor(Year), 
+                             color = factor(Year))) +
+  geom_violin(alpha = 0.3, trim = TRUE) +
+  geom_boxplot(width = 0.12, alpha = 0.7, outlier.shape = NA,
+               color = "gray20") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_fill_manual(values = year_colors) +
+  scale_color_manual(values = year_colors) +
+  labs(
+    title    = "Violin Plot of Normalized Scores",
+    subtitle = "Median = 0 → average participant of the year",
+    x = "Year", y = "Z-score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title    = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 10))
+
+p3 <- ggplot(full_data, aes(x = Math_pct, color = factor(Year))) +
+  stat_ecdf(linewidth = 0.9) +
+  scale_color_manual(values = year_colors) +
+  labs(
+    title    = "ECDF — Empirical Cumulative Distribution Function",
+    subtitle = "Overlapping lines indicate identical distributions",
+    x = "Percentile Rank (%)", y = "Cumulative Proportion",
+    color = "Year"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right",
+        plot.title    = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 10))
+
+
+layout <- (p1 + p2) / p3 +
+  plot_annotation(
+    title    = "NMT Mathematics Distribution Analysis (2022–2025)",
+    subtitle = "Year-specific normalization neutralizes different scoring scales",
+    theme = theme(
+      plot.title    = element_text(size = 15, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "gray40")
+    )
+  ) +
+  plot_layout(heights = c(1, 1))
+
+print(layout)
+```
+
+### Performance Model: OLS Regression
+
+```{r}
+
+data$RegName <- relevel(data$RegName, ref = "Тернопільська область")
+```
+
+```{r}
+performance_model <- lm(performance ~ data$SexTypeName + data$RegName  + data$PTRegName + data$Year + data$age, data = data)
+
+summary(performance_model)
+```
+
+#### **Assumption diagnostics**
+
+```{r}
+cat("\n--- Variance Inflation Factors (VIF) ---\n")
+print(vif(performance_model))
+
+cat("\n--- Breusch-Pagan Test (H0: homoscedastic) ---\n")
+print(bptest(performance_model))
+
+cat("\n--- Durbin-Watson Test (H0: no autocorrelation) ---\n")
+print(dwtest(performance_model))
+
+cat("\n--- Kolmogorov-Smirnov Test for Normality of Residuals ---\n")
+ks_result <- ks.test(residuals(performance_model), "pnorm",
+                     mean = mean(residuals(performance_model)),
+                     sd   = sd(residuals(performance_model)))
+print(ks_result)
+
+par(mfrow = c(2, 2))
+plot(performance_model)
+par(mfrow = c(1, 1))
+```
+
+### Migration Model: Logistic Regression
+
+```{r}
+nmt_logit <- data %>%
+  mutate(
+    Migrated = as.integer(!is.na(PTRegName) & as.character(PTRegName) != as.character(RegName)),
+    
+    Female   = as.integer(SexTypeName == "жіноча"),
+    Urban    = as.integer(TerTypeName == "місто"),
+    
+    War     = as.integer(Year >= 2022),
+    WarYear = pmax(Year - 2021, 0),
+    
+    Frontline_ord = case_when(
+      RegName %in% c("Луганська область", "Донецька область")                     ~ 4,
+      RegName %in% c("Запорізька область", "Херсонська область",
+                     "Харківська область", "Миколаївська область")                ~ 3,
+      RegName %in% c("Дніпропетровська область", "Сумська область",
+                     "Чернігівська область", "Одеська область")                   ~ 2,
+      TRUE                                                                         ~ 1
+    ),
+    
+  
+    Frontline_coll = case_when(
+      Frontline_ord <= 2 ~ Frontline_ord,
+      Frontline_ord >= 3 ~ 3L
+    )
+  ) %>%
+  group_by(Year) %>%
+  mutate(
+    Math_z = scale(MathBall100)[, 1],
+    Math_q = ntile(MathBall100, 5)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Migrated), !is.na(Math_z), !is.na(Math_q))
+
+```
+
+```{r}
+m_nmt_clean <- glm(
+  Migrated ~
+    Female * factor(Frontline_ord) + 
+    Urban +                           
+    factor(Math_q) +                  
+    age +                             
+    factor(Year),                    
+  family = binomial(link = "logit"),
+  data = nmt_logit
+)
+
+AIC(m_nmt_clean)
+```
+
+```{r}
+summary(m_nmt_clean)
+```
+
+#### Assumption diagnostics
+
+```{r}
+coeftest(m_nmt_clean, vcov = vcovCL(m_nmt_clean, cluster = ~RegName))
+
+
+roc_nmt <- roc(nmt_logit$Migrated, fitted(m_nmt_clean))
+cat("AUC:", round(auc(roc_nmt), 4), "\n")
+
+
+m_null <- glm(Migrated ~ 1, family = binomial(), data = nmt_logit)
+mcfadden <- 1 - (logLik(m_nmt_clean) / logLik(m_null))
+cat("McFadden R²:", round(mcfadden, 4), "\n")
+
+
+
+vif(m_nmt_clean)
+```
+
+------------------------------------------------------------------------
+
+### Migration Model: Logistic Regression
+
+```{r}
+m_full <- glm(
+  Migrated ~
+    Female * factor(Frontline_ord) +  # replicates M5 core
+    Urban +                            # replicates M5
+    factor(Math_q) +                   # replaces Math_raw
+    age +                              # replaces Birth, cleaner interpretation
+    factor(Year),                      # replaces transport/school_size context
+  family = binomial(link = "logit"),
+  data = nmt_logit
+)
+summary(m_full)
+AIC(m_full)
+```
+
+```{r}
+coeftest(m_full, vcov = vcovCL(m_final, cluster = ~RegName))
+```
+
+```{r}
+
+dt <- read.csv(
+  "merged_dataset_logit.csv",
+  sep = ",",
+  fileEncoding = "UTF-8",
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+
+# migration
+dt$Migrated <- ifelse(dt$RegName != dt$PTRegName, 1, 0)
+
+# gender
+dt$Female <- ifelse(dt$SexTypeName == "жіноча", 1, 0)
+
+# urban
+dt$Urban <- ifelse(grepl("місто", dt$TerTypeName), 1, 0)
+
+```
+
+```{r}
+front_rank <- c(
+  "Донецька область" = 4L,
+  "Луганська область" = 4L,
+  "Запорізька область" = 4L,
+  "Херсонська область" = 4L,
+
+  "Харківська область" = 3L,
+  "Миколаївська область" = 3L,
+  "Дніпропетровська область" = 3L,
+  "Сумська область" = 3L,
+  "Чернігівська область" = 3L,
+
+  "Одеська область" = 2L,
+  "Полтавська область" = 2L,
+  "Київська область" = 2L,
+  "м. Київ" = 2L,
+  "Житомирська область" = 2L,
+  "Черкаська область" = 2L,
+  "Кіровоградська область" = 2L,
+  "Хмельницька область" = 2L,
+
+  "Львівська область" = 1L,
+  "Івано-Франківська область" = 1L,
+  "Тернопільська область" = 1L,
+  "Рівненська область" = 1L,
+  "Волинська область" = 1L,
+  "Закарпатська область" = 1L,
+  "Чернівецька область" = 1L,
+  "Вінницька область" = 1L
+)
+
+dt$Frontline_ord <- front_rank[dt$RegName]
+```
+
+```{r}
+dt$Math_raw <- as.numeric(gsub(",", "", dt$MathBlockBall100))
+```
+
+```{r}
+math_threshold <- quantile(dt$Math_raw, 0.75, na.rm = TRUE)
+dt$High_Math <- ifelse(dt$Math_raw >= math_threshold, 1, 0)
+```
+
+```{r}
+logit_data <- subset(
+  dt,
+  !is.na(Migrated) & !is.na(Female) & !is.na(Urban) &
+  !is.na(Frontline_ord) & !is.na(Math_raw) &
+  !is.na(transport_share) & !is.na(average_school_size) & !is.na(High_Math)
+)
+```
+
+```{r}
+logit_data$Math_q <- ntile(logit_data$Math_raw, 5)
+
+logit_data <- logit_data %>%
+  mutate(
+    log_transport   = log(transport_share + 0.001),
+    log_school_size = log(average_school_size)
+  )
+```
+
+```{r}
+m5_corrected <- glm(
+  Migrated ~ Female * factor(Frontline_ord) + Urban +
+    factor(Math_q) +
+    log_transport + log_school_size,
+  family = binomial(link = "logit"),
+  data   = logit_data
+)
+
+summary(m5_corrected)
+```
+
+```{r}
+m5_null <- glm(Migrated ~ 1, family = binomial(), data = logit_data)
+lrtest(m5_null, m5_corrected)
+```
